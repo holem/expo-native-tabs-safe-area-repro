@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "Expo Native Tabs Safe Area Repro",
+    "slug": "expo-native-tabs-safe-area-repro",
+    "scheme": "expo-native-tabs-safe-area-repro",
+    "version": "1.0.0",
+    "ios": {
+      "bundleIdentifier": "dev.repro.expo42486",
+      "supportsTablet": true
+    },
+    "plugins": [
+      "expo-router"
+    ]
+  }
+}
