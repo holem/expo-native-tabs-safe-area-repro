@@ -1,0 +1,551 @@
+diff --git a/ios/tabs/screen/RNSTabsScreenViewController.mm b/ios/tabs/screen/RNSTabsScreenViewController.mm
+--- a/ios/tabs/screen/RNSTabsScreenViewController.mm
++++ b/ios/tabs/screen/RNSTabsScreenViewController.mm
+@@ -5,9 +5,160 @@
+ #import "RNSLog.h"
+ #import "RNSTabBarController.h"
+ #import "UIScrollView+RNScreens.h"
++#import <QuartzCore/QuartzCore.h>
++#import <dispatch/dispatch.h>
++#include <react/timing/primitives.h>
++#include <cmath>
++
++// This diagnostic never owns the controller through CADisplayLink's target.
++@interface RNSTabsScreenViewController (RNS42486FrameTrace)
++- (void)rns42486DisplayTick:(CADisplayLink *)link;
++@end
++
++@interface RNS42486DisplayTarget : NSObject
++@property (nonatomic, weak) RNSTabsScreenViewController *owner;
++- (void)tick:(CADisplayLink *)link;
++@end
++
++@implementation RNS42486DisplayTarget
++- (void)tick:(CADisplayLink *)link
++{
++  RNSTabsScreenViewController *owner = self.owner;
++  if (owner == nil) {
++    [link invalidate];
++    return;
++  }
++  [owner rns42486DisplayTick:link];
++}
++@end
++
++static double RNS42486Now()
++{
++  return facebook::react::HighResTimeStamp::now().toDOMHighResTimeStamp();
++}
++
++static id RNS42486Rect(CGRect rect)
++{
++  if (!std::isfinite(rect.origin.x) || !std::isfinite(rect.origin.y) ||
++      !std::isfinite(rect.size.width) || !std::isfinite(rect.size.height)) {
++    return NSNull.null;
++  }
++  return @[@(rect.origin.x), @(rect.origin.y), @(rect.size.width), @(rect.size.height)];
++}
++
++// Use the ancestor from this presentation tree; a separate presentationLayer call may return a copy.
++static CALayer *RNS42486PresentationWindow(CALayer *presentation, CALayer *modelWindow, NSString **status)
++{
++  CALayer *match = nil;
++  CALayer *ancestor = presentation.superlayer;
++  for (NSUInteger depth = 0; ancestor != nil && depth < 256; depth++, ancestor = ancestor.superlayer) {
++    if (ancestor.modelLayer == modelWindow) {
++      if (match != nil) {
++        *status = @"ambiguous-presentation-window";
++        return nil;
++      }
++      match = ancestor;
++    }
++  }
++  if (ancestor != nil) {
++    *status = @"presentation-chain-limit";
++    return nil;
++  }
++  *status = match != nil ? @"available" : @"no-presentation-window-ancestor";
++  return match;
++}
++
++// This worker receives Foundation snapshots only; it never reads controller/UIKit state.
++static void RNS42486WriteFrameRows(NSArray<NSDictionary *> *rows, NSDictionary *metadata, NSString *name)
++{
++  NSMutableData *body = [NSMutableData data];
++  NSUInteger emitted = 0, oversize = 0, serializationErrors = 0;
++  for (NSDictionary *row in rows) {
++    NSError *error = nil;
++    NSData *data = [NSJSONSerialization dataWithJSONObject:row options:NSJSONWritingSortedKeys error:&error];
++    if (data == nil) {
++      serializationErrors++;
++      continue;
++    }
++    // No text clipping: an oversized row is counted and omitted in full.
++    if (data.length >= 900) {
++      oversize++;
++      continue;
++    }
++    [body appendData:data];
++    [body appendBytes:"\n" length:1];
++    emitted++;
++  }
++  NSUInteger dropped = [metadata[@"capacityDrops"] unsignedIntegerValue] + oversize + serializationErrors;
++  NSMutableDictionary *manifest = [metadata mutableCopy];
++  [manifest addEntriesFromDictionary:@{
++    @"emittedRows" : @(emitted), @"droppedRows" : @(dropped),
++    @"oversizeDrops" : @(oversize), @"serializationErrors" : @(serializationErrors), @"bodyBytes" : @(body.length)
++  }];
++  NSError *error = nil;
++  NSData *header = [NSJSONSerialization dataWithJSONObject:manifest options:NSJSONWritingSortedKeys error:&error];
++  NSMutableData *file = [NSMutableData data];
++  if (header != nil && header.length < 900) {
++    [file appendData:header];
++    [file appendBytes:"\n" length:1];
++    [file appendData:body];
++  }
++  NSURL *documents = [NSFileManager.defaultManager URLForDirectory:NSDocumentDirectory
++                                                        inDomain:NSUserDomainMask
++                                               appropriateForURL:nil create:YES error:&error];
++  NSURL *directory = [documents URLByAppendingPathComponent:@"native-tabs-42486" isDirectory:YES];
++  BOOL madeDirectory = directory != nil && [NSFileManager.defaultManager createDirectoryAtURL:directory
++                                                              withIntermediateDirectories:YES attributes:nil error:&error];
++  NSURL *url = [directory URLByAppendingPathComponent:name];
++  BOOL written = file.length != 0 && madeDirectory && [file writeToURL:url options:NSDataWritingAtomic error:&error];
++  NSLog(@"[native-tabs-42486] frame-file path=%@ rows=%lu expected=%lu dropped=%lu bytes=%lu stop=%@ writeOK=%d error=%@:%ld",
++        url.path ?: @"", (unsigned long)emitted, (unsigned long)[metadata[@"expectedRows"] unsignedIntegerValue],
++        (unsigned long)dropped, (unsigned long)file.length, metadata[@"stopReason"],
++        written, error.domain ?: @"", (long)error.code);
++}
++
++static void RNS42486EnqueueFrameRows(NSArray<NSDictionary *> *rows, NSDictionary *metadata, NSString *name)
++{
++  static dispatch_queue_t queue;
++  static dispatch_semaphore_t slots;
++  static dispatch_once_t once;
++  dispatch_once(&once, ^{
++    queue = dispatch_queue_create("dev.repro.nativetabsinsets.frame-files",
++        dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
++    slots = dispatch_semaphore_create(8);
++  });
++  // Bound both queued and running batches; never wait for file IO on the UI thread.
++  if (dispatch_semaphore_wait(slots, DISPATCH_TIME_NOW) != 0) {
++    NSLog(@"[native-tabs-42486] frame-file droppedBatches=1 pendingLimit=8 controller=%@ visit=%@ expected=%@ stop=%@",
++          metadata[@"controller"], metadata[@"visit"], metadata[@"expectedRows"], metadata[@"stopReason"]);
++    return;
++  }
++  dispatch_async(queue, ^{
++    @autoreleasepool {
++      RNS42486WriteFrameRows(rows, metadata, name);
++    }
++    dispatch_semaphore_signal(slots);
++  });
++}
+ 
+ @implementation RNSTabsScreenViewController {
+   RNSContainerItemSupport *_Nonnull _containerItemSupport;
++  UIView *_Nullable _rns42486GuideControl;
++  CADisplayLink *_Nullable _rns42486DisplayLink;
++  NSMutableArray<NSDictionary *> *_Nullable _rns42486FrameRows;
++  __weak UIView *_Nullable _rns42486FrameRoot;
++  NSString *_Nullable _rns42486FrameRoute;
++  NSInteger _rns42486FrameRootTag;
++  NSUInteger _rns42486FrameVisit;
++  NSUInteger _rns42486FrameSample;
++  NSUInteger _rns42486FrameTicks;
++  double _rns42486FrameStartedRNms;
++  NSUInteger _rns42486ExpectedRows;
++  NSUInteger _rns42486CapacityDrops;
++  NSString *_Nullable _rns42486FrameFixture;
++  NSUInteger _rns42486FrameTargetsPerSample;
++  BOOL _rns42486FrameTargetCountMixed;
++  BOOL _rns42486FrameActive;
+ }
+ 
+ - (instancetype)init
+@@ -38,32 +189,386 @@
+   [[self findTabBarController] setNeedsOrientationUpdate:true];
+ }
+ 
++- (void)rns42486TraceLifecycle:(NSString *)event
++{
++  RNSTabsScreenComponentView *view = static_cast<RNSTabsScreenComponentView *>(self.viewIfLoaded);
++  NSLog(@"[native-tabs-42486] native uptimeMs=%.3f event=%@ controller=%p view=%p tag=%ld key=%@ parent=%p window=%p superview=%p frame=%@ safeAreaInsets=%@ guideControlPresent=%d guideControl=%p guideControlSuperview=%p guideControlFrame=%@ safeAreaLayoutFrame=%@",
++        NSProcessInfo.processInfo.systemUptime * 1000.0,
++        event,
++        (__bridge void *)self,
++        (__bridge void *)view,
++        (long)view.tag,
++        view.screenKey,
++        (__bridge void *)self.parentViewController,
++        (__bridge void *)view.window,
++        (__bridge void *)view.superview,
++        NSStringFromCGRect(view.frame),
++        NSStringFromUIEdgeInsets(view.safeAreaInsets),
++        _rns42486GuideControl != nil,
++        (__bridge void *)_rns42486GuideControl,
++        (__bridge void *)_rns42486GuideControl.superview,
++        NSStringFromCGRect(_rns42486GuideControl ? _rns42486GuideControl.frame : CGRectZero),
++        NSStringFromCGRect(view ? view.safeAreaLayoutGuide.layoutFrame : CGRectZero));
++}
++
++- (void)rns42486InstallGuideIfNeeded
++{
++  UIView *screenView = self.viewIfLoaded;
++  if (_rns42486GuideControl != nil || screenView == nil) {
++    return;
++  }
++  UIView *outline = [UIView new];
++  outline.translatesAutoresizingMaskIntoConstraints = NO;
++  outline.userInteractionEnabled = NO;
++  outline.isAccessibilityElement = NO;
++  outline.accessibilityElementsHidden = YES;
++  outline.backgroundColor = UIColor.clearColor;
++  outline.opaque = NO;
++  UIColor *guideColor = [UIColor colorWithRed:1.0 green:0.0 blue:0.65 alpha:1.0];
++  outline.layer.borderColor = guideColor.CGColor;
++  outline.layer.borderWidth = 2.0;
++  outline.layer.zPosition = 1.0;
++  [screenView addSubview:outline];
++  _rns42486GuideControl = outline;
++
++  // 76 = this fixture's 44-point content + 16-point top and bottom padding; it is not an inset.
++  [NSLayoutConstraint activateConstraints:@[
++    [outline.leadingAnchor constraintEqualToAnchor:screenView.leadingAnchor],
++    [outline.widthAnchor constraintEqualToAnchor:screenView.widthAnchor multiplier:0.24],
++    [outline.bottomAnchor constraintEqualToAnchor:screenView.bottomAnchor],
++    [outline.topAnchor constraintEqualToAnchor:screenView.safeAreaLayoutGuide.bottomAnchor constant:-76.0],
++  ]];
++
++  UILabel *label = [UILabel new];
++  label.translatesAutoresizingMaskIntoConstraints = NO;
++  label.userInteractionEnabled = NO;
++  label.isAccessibilityElement = NO;
++  label.text = @"UIKit";
++  label.textColor = guideColor;
++  label.font = [UIFont systemFontOfSize:9.0];
++  [outline addSubview:label];
++  [NSLayoutConstraint activateConstraints:@[
++    [label.leadingAnchor constraintEqualToAnchor:outline.leadingAnchor constant:4.0],
++    [label.topAnchor constraintEqualToAnchor:outline.topAnchor constant:4.0],
++  ]];
++
++  [self rns42486TraceLifecycle:@"guide-control-installed"];
++}
++
++// Rows are immutable snapshots. JSON serialization and disk IO happen only at stop.
++- (void)rns42486BufferFrameRow:(NSDictionary *)row
++{
++  _rns42486ExpectedRows++;
++  if (_rns42486FrameRows.count >= 2048) {
++    _rns42486CapacityDrops++;
++    return;
++  }
++  [_rns42486FrameRows addObject:[row copy]];
++}
++
++- (void)rns42486StopFrameTrace:(NSString *)reason
++{
++  if (!_rns42486FrameActive) {
++    return;
++  }
++  _rns42486FrameActive = NO;
++  [_rns42486DisplayLink invalidate];
++  _rns42486DisplayLink = nil;
++  double stoppedRNms = RNS42486Now();
++  NSArray<NSDictionary *> *rows = [_rns42486FrameRows copy];
++  NSString *controller = [NSString stringWithFormat:@"%p", (__bridge void *)self];
++  int pid = NSProcessInfo.processInfo.processIdentifier;
++  NSDictionary *metadata = @{
++    @"event" : @"frame-trace-manifest", @"schema" : @1,
++    @"pid" : @(pid), @"controller" : controller,
++    @"visit" : @(_rns42486FrameVisit), @"route" : [_rns42486FrameRoute copy] ?: @"",
++    @"screenTag" : @(_rns42486FrameRootTag), @"stopReason" : [reason copy],
++    @"startedRNms" : @(_rns42486FrameStartedRNms), @"stoppedRNms" : @(stoppedRNms),
++    @"elapsedRNms" : @(stoppedRNms - _rns42486FrameStartedRNms), @"durationLimitMs" : @2000,
++    @"samples" : @(_rns42486FrameSample),
++    @"displayTicks" : @(_rns42486FrameTicks), @"tickLimit" : @120, @"rowLimit" : @2048,
++    @"expectedRows" : @(_rns42486ExpectedRows), @"capacityDrops" : @(_rns42486CapacityDrops),
++    @"fixture" : [_rns42486FrameFixture copy] ?: @"unknown",
++    @"expectedTargetsPerSample" : _rns42486FrameTargetCountMixed ? (id)NSNull.null : @(_rns42486FrameTargetsPerSample),
++    @"truncatedRows" : @0, @"rectOrder" : @"x,y,width,height", @"presentationIsPaintACK" : @NO
++  };
++  NSString *name = [NSString stringWithFormat:@"frames-%d-%@-v%lu.jsonl", pid, controller,
++                      (unsigned long)_rns42486FrameVisit];
++  _rns42486FrameRows = nil;
++  _rns42486FrameRoot = nil;
++  RNS42486EnqueueFrameRows(rows, metadata, name);
++}
++
++- (void)rns42486CaptureFrames:(NSString *)phase displayLink:(CADisplayLink *)link
++{
++  if (!_rns42486FrameActive || !NSThread.isMainThread) {
++    return;
++  }
++  RNSTabsScreenComponentView *root = static_cast<RNSTabsScreenComponentView *>(self.viewIfLoaded);
++  if (root != _rns42486FrameRoot || ![(root.screenKey ?: @"") isEqualToString:_rns42486FrameRoute]) {
++    [self rns42486StopFrameTrace:@"view-or-key-replaced"];
++    return;
++  }
++  const NSUInteger sample = ++_rns42486FrameSample;
++  const double rnBefore = RNS42486Now();
++  const double caNow = CACurrentMediaTime();
++  const double rnAfter = RNS42486Now();
++  NSArray<NSString *> *nativeStateNames = @[@"rnc-container", @"rnc-marker", @"rnc-child",
++                                           @"rn-core-container", @"rn-core-marker", @"rn-core-child"];
++  NSArray<NSString *> *footerNames = @[@"native-footer", @"native-content", @"js-footer", @"js-content",
++                                      @"animated-static-footer", @"animated-static-content",
++                                      @"animated-worklet-footer", @"animated-worklet-content"];
++  NSString *footerRootID = [NSString stringWithFormat:@"%@-footer-screen", _rns42486FrameRoute];
++  NSString *nativeStateRootID = [NSString stringWithFormat:@"%@-native-state-screen", _rns42486FrameRoute];
++  NSMutableDictionary<NSString *, UIView *> *found = [NSMutableDictionary new];
++  NSMutableSet<NSString *> *duplicates = [NSMutableSet new];
++  NSMutableSet<NSString *> *wanted = [NSMutableSet setWithObjects:footerRootID, nativeStateRootID, nil];
++  for (NSString *name in [footerNames arrayByAddingObjectsFromArray:nativeStateNames]) {
++    [wanted addObject:[NSString stringWithFormat:@"%@-%@", _rns42486FrameRoute, name]];
++  }
++  NSMutableArray<UIView *> *pending = [NSMutableArray new];
++  if (root != nil) {
++    [pending addObject:root];
++  }
++  NSUInteger searched = 0;
++  while (pending.count != 0 && searched < 512) {
++    UIView *view = pending.lastObject;
++    [pending removeLastObject];
++    searched++;
++    NSString *identifier = view.accessibilityIdentifier;
++    if (identifier != nil && [wanted containsObject:identifier]) {
++      if (found[identifier] != nil) {
++        [duplicates addObject:identifier];
++      } else {
++        found[identifier] = view;
++      }
++    }
++    [pending addObjectsFromArray:view.subviews];
++  }
++  // Fixture roots belong to descendant Views, never to the controller's root itself.
++  const BOOL footerRootPresent = found[footerRootID] != nil;
++  const BOOL nativeStateRootPresent = found[nativeStateRootID] != nil;
++  const BOOL ambiguousRoot = [duplicates containsObject:footerRootID] || [duplicates containsObject:nativeStateRootID];
++  NSString *fixture = @"unknown";
++  NSArray<NSString *> *names = @[];
++  if (!ambiguousRoot && footerRootPresent && !nativeStateRootPresent) {
++    fixture = @"footer";
++    names = footerNames;
++  } else if (!ambiguousRoot && nativeStateRootPresent && !footerRootPresent) {
++    fixture = @"native-state";
++    names = nativeStateNames;
++  } else if (ambiguousRoot || (footerRootPresent && nativeStateRootPresent)) {
++    fixture = @"mixed";
++    names = [footerNames arrayByAddingObjectsFromArray:nativeStateNames];
++  }
++  NSArray<NSString *> *allNames = [names arrayByAddingObject:@"uikit-guide"];
++  const NSUInteger targetCount = allNames.count;
++  if (_rns42486FrameFixture == nil) {
++    _rns42486FrameFixture = [fixture copy];
++    _rns42486FrameTargetsPerSample = targetCount;
++  } else {
++    if (![_rns42486FrameFixture isEqualToString:fixture]) {
++      _rns42486FrameFixture = @"mixed";
++    }
++    if (_rns42486FrameTargetsPerSample != targetCount) {
++      _rns42486FrameTargetCountMixed = YES;
++    }
++  }
++  // One clock row plus this fixture's exact target rows; no hard-coded batch size.
++  if (_rns42486FrameRows.count >= 2048) {
++    _rns42486ExpectedRows += targetCount + 1;
++    _rns42486CapacityDrops += targetCount + 1;
++    return;
++  }
++  UIEdgeInsets insets = root ? root.safeAreaInsets : UIEdgeInsetsZero;
++  id screenFrame = root ? RNS42486Rect(root.frame) : NSNull.null;
++  const double screenReadRNms = RNS42486Now();
++  [self rns42486BufferFrameRow:@{
++    @"event" : @"frame-sample", @"sample" : @(sample), @"phase" : phase,
++    @"fixture" : fixture, @"expectedTargets" : @(targetCount),
++    @"rnBeforeMs" : @(rnBefore), @"caNowSeconds" : @(caNow), @"rnAfterMs" : @(rnAfter),
++    @"displayTimestampSeconds" : link ? @(link.timestamp) : (id)NSNull.null,
++    @"displayTargetTimestampSeconds" : link ? @(link.targetTimestamp) : (id)NSNull.null,
++    @"searchedViews" : @(searched), @"searchLimitHit" : @(pending.count != 0),
++    @"screenSafeArea" : @[@(insets.top), @(insets.right), @(insets.bottom), @(insets.left)],
++    @"screenFrame" : screenFrame, @"screenReadRNms" : @(screenReadRNms)
++  }];
++  NSMutableArray *targets = [NSMutableArray array];
++  for (NSString *name in names) {
++    NSString *identifier = [NSString stringWithFormat:@"%@-%@", _rns42486FrameRoute, name];
++    [targets addObject:([duplicates containsObject:identifier] ? (id)NSNull.null : found[identifier]) ?: NSNull.null];
++  }
++  [targets addObject:_rns42486GuideControl ?: (id)NSNull.null];
++  for (NSUInteger index = 0; index < allNames.count; index++) {
++    NSString *name = allNames[index];
++    id candidate = targets[index];
++    const double readStart = RNS42486Now();
++    if (candidate == NSNull.null) {
++      NSString *identifier = [NSString stringWithFormat:@"%@-%@", _rns42486FrameRoute, name];
++      [self rns42486BufferFrameRow:@{
++        @"event" : @"frame-target", @"sample" : @(sample), @"target" : name,
++        @"rnReadStartMs" : @(readStart), @"rnReadEndMs" : @(RNS42486Now()),
++        @"status" : [duplicates containsObject:identifier] ? @"duplicate-id" : @"missing-id",
++        @"tag" : NSNull.null, @"modelFrame" : NSNull.null,
++        @"modelWindowRect" : NSNull.null, @"presentationFrame" : NSNull.null,
++        @"presentationWindowRect" : NSNull.null, @"presentationStatus" : @"missing-view"
++      }];
++      continue;
++    }
++    UIView *view = candidate;
++    UIWindow *window = view.window;
++    CALayer *presentation = view.layer.presentationLayer;
++    NSString *presentationStatus = @"available";
++    id presentationWindowRect = NSNull.null;
++    if (presentation == nil) {
++      presentationStatus = @"no-presentation-layer";
++    } else if (window == nil || window != root.window) {
++      presentationStatus = @"no-matching-window";
++    } else {
++      CALayer *windowPresentation = RNS42486PresentationWindow(presentation, window.layer, &presentationStatus);
++      if (windowPresentation != nil) {
++        presentationWindowRect = RNS42486Rect([presentation convertRect:presentation.bounds toLayer:windowPresentation]);
++      }
++    }
++    id modelFrame = RNS42486Rect(view.frame);
++    id modelWindowRect = window ? RNS42486Rect([view convertRect:view.bounds toView:window]) : NSNull.null;
++    id presentationFrame = presentation ? RNS42486Rect(presentation.frame) : NSNull.null;
++    NSNumber *modelTransform = @(CATransform3DIsIdentity(view.layer.transform));
++    id presentationTransform = presentation ? @(CATransform3DIsIdentity(presentation.transform)) : (id)NSNull.null;
++    NSNumber *animations = @(view.layer.animationKeys.count);
++    NSNumber *hidden = @(view.hidden), *alpha = @(view.alpha);
++    NSNumber *tag = @(view.tag), *parentTag = @(view.superview.tag);
++    const double readEnd = RNS42486Now();
++    NSDictionary *row = @{
++      @"event" : @"frame-target", @"sample" : @(sample), @"target" : name,
++      @"rnReadStartMs" : @(readStart), @"rnReadEndMs" : @(readEnd), @"status" : @"found",
++      @"tag" : tag, @"parentTag" : parentTag,
++      @"window" : [NSString stringWithFormat:@"%p", (__bridge void *)window],
++      @"modelFrame" : modelFrame, @"modelWindowRect" : modelWindowRect,
++      @"presentationFrame" : presentationFrame,
++      @"presentationWindowRect" : presentationWindowRect, @"presentationStatus" : presentationStatus,
++      @"layerTransformIdentity" : modelTransform, @"presentationTransformIdentity" : presentationTransform,
++      @"animationCount" : animations, @"hidden" : hidden, @"alpha" : alpha
++    };
++    [self rns42486BufferFrameRow:row];
++  }
++}
++
++- (void)rns42486StartFrameTrace
++{
++  if (!NSThread.isMainThread) {
++    return;
++  }
++  [self rns42486StopFrameTrace:@"restarted"];
++  RNSTabsScreenComponentView *root = static_cast<RNSTabsScreenComponentView *>(self.viewIfLoaded);
++  _rns42486FrameVisit++;
++  _rns42486FrameStartedRNms = RNS42486Now();
++  _rns42486FrameSample = _rns42486FrameTicks = _rns42486ExpectedRows = _rns42486CapacityDrops = 0;
++  _rns42486FrameFixture = nil;
++  _rns42486FrameTargetsPerSample = 0;
++  _rns42486FrameTargetCountMixed = NO;
++  _rns42486FrameRows = [NSMutableArray array];
++  _rns42486FrameRoot = root;
++  _rns42486FrameRootTag = root.tag;
++  _rns42486FrameRoute = [root.screenKey ?: @"" copy];
++  _rns42486FrameActive = YES;
++  RNS42486DisplayTarget *target = [RNS42486DisplayTarget new];
++  target.owner = self;
++  _rns42486DisplayLink = [CADisplayLink displayLinkWithTarget:target selector:@selector(tick:)];
++  [_rns42486DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
++}
++
++- (void)rns42486DisplayTick:(CADisplayLink *)link
++{
++  if (!_rns42486FrameActive || link != _rns42486DisplayLink) {
++    return;
++  }
++  _rns42486FrameTicks++;
++  [self rns42486CaptureFrames:@"display-link" displayLink:link];
++  if (_rns42486FrameTicks >= 120) {
++    [self rns42486StopFrameTrace:@"tick-limit"];
++  } else if (RNS42486Now() - _rns42486FrameStartedRNms >= 2000.0) {
++    // Observation bound only; never delays or gates the original lifecycle.
++    [self rns42486StopFrameTrace:@"duration-limit"];
++  }
++}
++
++- (void)dealloc
++{
++  // Snapshot only; file serialization/IO runs on the bounded diagnostic queue.
++  [self rns42486StopFrameTrace:@"dealloc"];
++}
++
+ - (void)viewWillAppear:(BOOL)animated
+ {
++  [self rns42486StartFrameTrace];
++  [self rns42486CaptureFrames:@"viewWillAppear-before-super" displayLink:nil];
+   [super viewWillAppear:animated];
++  [self rns42486InstallGuideIfNeeded];
++  [self rns42486CaptureFrames:@"viewWillAppear-after-super" displayLink:nil];
++  [self rns42486TraceLifecycle:@"viewWillAppear"];
+   [self.tabScreenComponentView.reactEventEmitter emitOnWillAppear];
+ }
+ 
++- (void)viewIsAppearing:(BOOL)animated
++{
++  [self rns42486CaptureFrames:@"viewIsAppearing-before-super" displayLink:nil];
++  [super viewIsAppearing:animated];
++  [self rns42486CaptureFrames:@"viewIsAppearing-after-super" displayLink:nil];
++  [self rns42486TraceLifecycle:@"viewIsAppearing"];
++}
++
++- (void)viewWillLayoutSubviews
++{
++  [self rns42486CaptureFrames:@"viewWillLayout-before-super" displayLink:nil];
++  [super viewWillLayoutSubviews];
++  [self rns42486CaptureFrames:@"viewWillLayout-after-super" displayLink:nil];
++}
++
++- (void)viewSafeAreaInsetsDidChange
++{
++  [super viewSafeAreaInsetsDidChange];
++  [self rns42486CaptureFrames:@"safeAreaInsetsDidChange-after-super" displayLink:nil];
++}
++
++- (void)viewDidLayoutSubviews
++{
++  [self rns42486CaptureFrames:@"viewDidLayout-before-super" displayLink:nil];
++  [super viewDidLayoutSubviews];
++  [self rns42486CaptureFrames:@"viewDidLayout-after-super" displayLink:nil];
++  [self rns42486TraceLifecycle:@"viewDidLayoutSubviews"];
++}
++
+ - (void)viewDidAppear:(BOOL)animated
+ {
+   [super viewDidAppear:animated];
++  [self rns42486TraceLifecycle:@"viewDidAppear"];
+   [self.tabScreenComponentView.reactEventEmitter emitOnDidAppear];
++  [self rns42486CaptureFrames:@"viewDidAppear-after-emitter" displayLink:nil];
+ }
+ 
+ - (void)viewWillDisappear:(BOOL)animated
+ {
+   [super viewWillDisappear:animated];
++  [self rns42486TraceLifecycle:@"viewWillDisappear"];
+   [self.tabScreenComponentView.reactEventEmitter emitOnWillDisappear];
++  [self rns42486StopFrameTrace:@"viewWillDisappear"];
+ }
+ 
+ - (void)viewDidDisappear:(BOOL)animated
+ {
+   [super viewDidDisappear:animated];
++  [self rns42486TraceLifecycle:@"viewDidDisappear"];
+   [self.tabScreenComponentView.reactEventEmitter emitOnDidDisappear];
++  [self rns42486StopFrameTrace:@"viewDidDisappear"];
+ }
+ 
+ - (void)didMoveToParentViewController:(UIViewController *)parent
+ {
++  if (parent == nil) {
++    [self rns42486StopFrameTrace:@"parent-detached"];
++  }
++  [self rns42486TraceLifecycle:@"didMoveToParentViewController"];
+   RNSLog(@"TabScreen [%ld] ctrl moved to parent: %@", self.tabScreenComponentView.tag, parent);
+ 
+   if (parent == nil) {

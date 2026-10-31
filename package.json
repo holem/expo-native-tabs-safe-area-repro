@@ -8,7 +8,8 @@
     "start": "expo start --dev-client --port 8083",
     "ios": "expo run:ios --device --port 8083",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --no-cache --max-warnings 0"
+    "lint": "eslint . --no-cache --max-warnings 0",
+    "logs:ios": "node scripts/collect-ios-logs.mjs"
   },
   "dependencies": {
     "@expo/metro-runtime": "58.0.15",

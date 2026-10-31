@@ -1,0 +1,605 @@
+diff --git a/ios/Fabric/RNCSafeAreaProviderComponentView.mm b/ios/Fabric/RNCSafeAreaProviderComponentView.mm
+--- a/ios/Fabric/RNCSafeAreaProviderComponentView.mm
++++ b/ios/Fabric/RNCSafeAreaProviderComponentView.mm
+@@ -7,6 +7,10 @@
+ 
+ #import <React/RCTFabricComponentsPlugins.h>
+ #import "RNCSafeAreaUtils.h"
++
++#if TARGET_OS_IPHONE
++#include <react/timing/primitives.h>
++#endif
+ 
+ using namespace facebook::react;
+ 
+@@ -71,6 +75,27 @@
+   [self invalidateSafeAreaInsets];
+ }
+ 
++- (void)rnc42486TraceInsets:(NSString *)event measuredFrame:(CGRect)frame
++{
++#if TARGET_OS_IPHONE
++  const double rnc42486RNMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  const double rnc42486UptimeMs = NSProcessInfo.processInfo.systemUptime * 1000.0;
++  NSLog(@"[native-tabs-42486] native uptimeMs=%.3f rnMs=%.6f event=%@ provider=%p tag=%ld window=%p superview=%p frame=%@ controllerFrame=%@ safeAreaInsets=%@ cachedInsets=%@ initialInsetsSent=%d",
++        rnc42486UptimeMs,
++        rnc42486RNMs,
++        event,
++        (__bridge void *)self,
++        (long)self.tag,
++        (__bridge void *)self.window,
++        (__bridge void *)self.superview,
++        NSStringFromCGRect(self.frame),
++        NSStringFromCGRect(frame),
++        NSStringFromUIEdgeInsets(self.safeAreaInsets),
++        NSStringFromUIEdgeInsets(_currentSafeAreaInsets),
++        _initialInsetsSent);
++#endif
++}
++
+ - (void)invalidateSafeAreaInsets
+ {
+   if (self.superview == nil) {
+@@ -84,6 +109,7 @@
+ 
+   UIEdgeInsets safeAreaInsets = self.safeAreaInsets;
+   CGRect frame = [self convertRect:self.bounds toView:RNCParentViewController(self).view];
++  [self rnc42486TraceInsets:@"provider-measure" measuredFrame:frame];
+ 
+   if (_initialInsetsSent &&
+ #if TARGET_OS_IPHONE
+@@ -99,6 +125,7 @@
+   _currentSafeAreaInsets = safeAreaInsets;
+   _currentFrame = frame;
+ 
++  [self rnc42486TraceInsets:@"provider-publish" measuredFrame:frame];
+   [NSNotificationCenter.defaultCenter postNotificationName:RNCSafeAreaDidChange object:self userInfo:nil];
+ 
+   if (_eventEmitter) {
+@@ -118,6 +145,7 @@
+                 .height = frame.size.height,
+             },
+     };
++    [self rnc42486TraceInsets:@"provider-js-event" measuredFrame:frame];
+     std::static_pointer_cast<RNCSafeAreaProviderEventEmitter const>(_eventEmitter)->onInsetsChange(event);
+   }
+ }
+diff --git a/ios/Fabric/RNCSafeAreaViewComponentView.mm b/ios/Fabric/RNCSafeAreaViewComponentView.mm
+--- a/ios/Fabric/RNCSafeAreaViewComponentView.mm
++++ b/ios/Fabric/RNCSafeAreaViewComponentView.mm
+@@ -8,19 +8,146 @@
+ 
+ #import <React/RCTConversions.h>
+ #import <React/RCTFabricComponentsPlugins.h>
++#if TARGET_OS_IPHONE
++#import <React/RCTMountingTransactionObserving.h>
++#include <react/timing/primitives.h>
++#include <cmath>
++#include <atomic>
++#import <dispatch/dispatch.h>
++#endif
+ 
+ #import "RNCSafeAreaProviderComponentView.h"
+ #import "RNCSafeAreaUtils.h"
+ 
+ using namespace facebook::react;
+ 
++#if TARGET_OS_IPHONE
++@interface RNCSafeAreaViewComponentView () <RCTRNCSafeAreaViewViewProtocol, RCTMountingTransactionObserving>
++#else
+ @interface RNCSafeAreaViewComponentView () <RCTRNCSafeAreaViewViewProtocol>
++#endif
+ @end
++
++#if TARGET_OS_IPHONE
++// Fixed testID hierarchies of the two probe fixtures; never search another tab or window.
++static UIView *RNC42486DirectSubview(UIView *parent, NSString *identifier)
++{
++  for (UIView *child in parent.subviews) {
++    if ([child.accessibilityIdentifier isEqualToString:identifier]) {
++      return child;
++    }
++  }
++  return nil;
++}
++
++static id RNC42486Number(double value)
++{
++  return std::isfinite(value) ? (id)@(value) : NSNull.null;
++}
++
++// Rect arrays always use [x, y, width, height]; no geometry rounding.
++static NSArray *RNC42486Rect(CGRect rect)
++{
++  return @[RNC42486Number(rect.origin.x), RNC42486Number(rect.origin.y),
++           RNC42486Number(rect.size.width), RNC42486Number(rect.size.height)];
++}
++
++static id RNC42486Pointer(const void *pointer)
++{
++  return pointer ? (id)[NSString stringWithFormat:@"%p", pointer] : NSNull.null;
++}
++
++static id RNC42486TelemetryMs(TelemetryTimePoint time)
++{
++  if (time == kTelemetryUndefinedTimePoint) {
++    return NSNull.null;
++  }
++  return RNC42486Number(std::chrono::duration<double, std::milli>(time.time_since_epoch()).count());
++}
++
++// NSLog's string payload was truncated at about 1024 bytes. Bound the complete
++// UTF-8 line before emission; a failed row is counted by the batch end record.
++static BOOL RNC42486EmitRow(NSDictionary *row)
++{
++  NSData *json = [NSJSONSerialization dataWithJSONObject:row options:0 error:nil];
++  if (json == nil || json.length + sizeof("[native-tabs-42486] geometry ") - 1 > 900) {
++    return NO;
++  }
++  NSLog(@"[native-tabs-42486] geometry %@", [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding]);
++  return YES;
++}
++
++static void RNC42486EmitRows(NSArray<NSDictionary *> *rows, NSDictionary *identity, NSUInteger expectedTargets, NSUInteger missingTargets,
++                           double sampleEndRNMs)
++{
++  NSUInteger emitted = 0;
++  NSUInteger emittedTargets = 0;
++  NSUInteger droppedTargets = 0;
++  const double flushStartRNMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  for (NSDictionary *row in rows) {
++    BOOL target = [row[@"kind"] isEqual:@"target"];
++    if (RNC42486EmitRow(row)) {
++      emitted++;
++      emittedTargets += target ? 1 : 0;
++    } else {
++      droppedTargets += target ? 1 : 0;
++    }
++  }
++  const double flushEndRNMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  NSMutableDictionary *end = [identity mutableCopy];
++  [end addEntriesFromDictionary:@{
++    @"kind" : @"end", @"rnMs" : @(sampleEndRNMs),
++    @"flushStartRNMs" : @(flushStartRNMs), @"flushEndRNMs" : @(flushEndRNMs),
++    @"expectedRecords" : @(rows.count), @"emittedRecords" : @(emitted),
++    @"droppedRecords" : @(rows.count - emitted), @"recordsExcludeEnd" : @YES,
++    @"expectedTargets" : @(expectedTargets), @"emittedTargets" : @(emittedTargets),
++    @"droppedTargets" : @(droppedTargets), @"missingTargets" : @(missingTargets)
++  }];
++  RNC42486EmitRow(end); // Fixed identity/count fields keep this final record below the same limit.
++}
++
++// Only captured Foundation values cross this queue; never retain a UIView, state, or transaction.
++static void RNC42486EnqueueRows(NSArray<NSDictionary *> *rows, NSDictionary *identity, NSUInteger expectedTargets, NSUInteger missingTargets,
++                              double sampleEndRNMs)
++{
++  static dispatch_queue_t queue;
++  static dispatch_semaphore_t pendingSlots;
++  static std::atomic<uint64_t> droppedBatches{0};
++  static dispatch_once_t once;
++  dispatch_once(&once, ^{
++    queue = dispatch_queue_create("dev.repro.native-tabs-42486.geometry-log", DISPATCH_QUEUE_SERIAL);
++    pendingSlots = dispatch_semaphore_create(32);
++  });
++  if (dispatch_semaphore_wait(pendingSlots, DISPATCH_TIME_NOW) != 0) {
++    droppedBatches.fetch_add(1, std::memory_order_relaxed);
++    return;
++  }
++  NSArray<NSDictionary *> *capturedRows = [[NSArray alloc] initWithArray:rows copyItems:YES];
++  NSDictionary *capturedIdentity = [identity copy];
++  dispatch_async(queue, ^{
++    @autoreleasepool {
++      RNC42486EmitRows(capturedRows, capturedIdentity, expectedTargets, missingTargets, sampleEndRNMs);
++      const uint64_t dropped = droppedBatches.exchange(0, std::memory_order_relaxed);
++      if (dropped != 0) {
++        RNC42486EmitRow(@{
++          @"event" : @"mount-transaction-geometry", @"kind" : @"batch-drop",
++          @"identityScope" : @"aggregate", @"reason" : @"pending-limit",
++          @"maxPendingBatches" : @32, @"droppedBatches" : @(dropped),
++          @"rnMs" : @(HighResTimeStamp::now().toDOMHighResTimeStamp())
++        });
++      }
++    }
++    dispatch_semaphore_signal(pendingSlots);
++  });
++}
++
++#endif
+ 
+ @implementation RNCSafeAreaViewComponentView {
+   RNCSafeAreaViewShadowNode::ConcreteState::Shared _state;
+   UIEdgeInsets _currentSafeAreaInsets;
+   __weak UIView *_Nullable _providerView;
++  NSUInteger _rnc42486RequestSequence; // Main-thread trace counter; retained across recycling.
+ }
+ 
+ // Needed because of this: https://github.com/facebook/react-native/pull/37274
+@@ -91,21 +218,51 @@
+   [self updateStateIfNecessary];
+ }
+ 
++- (void)rnc42486TraceState:(NSString *)event
++{
++#if TARGET_OS_IPHONE
++  const double rnc42486RNMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  const double rnc42486UptimeMs = NSProcessInfo.processInfo.systemUptime * 1000.0;
++  NSLog(@"[native-tabs-42486] native uptimeMs=%.3f rnMs=%.6f event=%@ safeAreaView=%p tag=%ld provider=%p window=%p superview=%p frame=%@ safeAreaInsets=%@ providerInsets=%@ requestedInsets=%@ shadowBottom=%.3f hasState=%d requestSequence=%lu mainThread=%d stateRevision=%zu stateData=%p",
++        rnc42486UptimeMs,
++        rnc42486RNMs,
++        event,
++        (__bridge void *)self,
++        (long)self.tag,
++        (__bridge void *)_providerView,
++        (__bridge void *)self.window,
++        (__bridge void *)self.superview,
++        NSStringFromCGRect(self.frame),
++        NSStringFromUIEdgeInsets(self.safeAreaInsets),
++        NSStringFromUIEdgeInsets(_providerView ? _providerView.safeAreaInsets : UIEdgeInsetsZero),
++        NSStringFromUIEdgeInsets(_currentSafeAreaInsets),
++        _state ? (double)_state->getData().insets.bottom : -1.0,
++        _state != nullptr,
++        NSThread.isMainThread ? (unsigned long)_rnc42486RequestSequence : 0UL,
++        (int)NSThread.isMainThread,
++        _state ? _state->getRevision() : 0,
++        _state ? static_cast<const void *>(&_state->getData()) : nullptr);
++#endif
++}
++
+ - (void)updateStateIfNecessary
+ {
+   // A view detached from the window (e.g. a screen covered by a react-native-screens
+   // native stack) reports zero safeAreaInsets, which would commit a zero-inset layout
+   // for the hidden screen.
+   if (self.window == nil) {
++    [self rnc42486TraceState:@"state-skip-no-window"];
+     return;
+   }
+   if (_providerView == nil) {
++    [self rnc42486TraceState:@"state-skip-no-provider"];
+     return;
+   }
+ #if TARGET_OS_IPHONE
+   UIEdgeInsets safeAreaInsets = _providerView.safeAreaInsets;
+ 
+   if (UIEdgeInsetsEqualToEdgeInsetsWithThreshold(safeAreaInsets, _currentSafeAreaInsets, 1.0 / RCTScreenScale())) {
++    [self rnc42486TraceState:@"state-skip-unchanged"];
+     return;
+   }
+ #elif TARGET_OS_OSX
+@@ -133,17 +290,222 @@
+ - (void)updateState
+ {
+   if (!_state) {
+-    return;
+-  }
+-
++    [self rnc42486TraceState:@"state-skip-no-state"];
++    return;
++  }
++
++#if TARGET_OS_IPHONE
++  // Component-view callers run on main. Only trace metadata is captured here.
++  const BOOL rnc42486RequestMainThread = NSThread.isMainThread;
++  const NSUInteger rnc42486RequestId = rnc42486RequestMainThread ? ++_rnc42486RequestSequence : 0;
++  const void *const rnc42486View = (__bridge const void *)self;
++  const NSInteger rnc42486Tag = rnc42486RequestMainThread ? self.tag : -1;
++  const double rnc42486RequestRNMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  const double rnc42486RequestUptimeMs = NSProcessInfo.processInfo.systemUptime * 1000.0;
++#endif
++  [self rnc42486TraceState:@"state-request"];
+   _state->updateState(
+       [=](RNCSafeAreaViewShadowNode::ConcreteState::Data const &oldData)
+           -> RNCSafeAreaViewShadowNode::ConcreteState::SharedData {
+         auto newData = oldData;
+         newData.insets = RCTEdgeInsetsFromUIEdgeInsets(_currentSafeAreaInsets);
+-        return std::make_shared<RNCSafeAreaViewShadowNode::ConcreteState::Data const>(newData);
++        auto newStateData = std::make_shared<RNCSafeAreaViewShadowNode::ConcreteState::Data const>(newData);
++#if TARGET_OS_IPHONE
++        // The returned Data object is the same object traced here; retries can allocate another one.
++        const double rnc42486TransformRNMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++        const double rnc42486TransformUptimeMs = NSProcessInfo.processInfo.systemUptime * 1000.0;
++        NSLog(@"[native-tabs-42486] native uptimeMs=%.3f rnMs=%.6f event=state-transform safeAreaView=%p tag=%ld requestId=%lu requestUptimeMs=%.3f requestRNMs=%.6f mainThread=%d requestMainThread=%d oldBottom=%.3f newBottom=%.3f newData=%p",
++              rnc42486TransformUptimeMs,
++              rnc42486TransformRNMs,
++              rnc42486View,
++              (long)rnc42486Tag,
++              (unsigned long)rnc42486RequestId,
++              rnc42486RequestUptimeMs,
++              rnc42486RequestRNMs,
++              (int)NSThread.isMainThread,
++              (int)rnc42486RequestMainThread,
++              (double)oldData.insets.bottom,
++              (double)newData.insets.bottom,
++              static_cast<const void *>(newStateData.get()));
++#endif
++        return newStateData;
+       });
+-}
++#if TARGET_OS_IPHONE
++  const double rnc42486ReturnRNMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  NSLog(@"[native-tabs-42486] native uptimeMs=%.3f rnMs=%.6f event=state-request-return safeAreaView=%p tag=%ld requestId=%lu requestUptimeMs=%.3f requestRNMs=%.6f mainThread=%d requestMainThread=%d",
++        NSProcessInfo.processInfo.systemUptime * 1000.0,
++        rnc42486ReturnRNMs,
++        rnc42486View,
++        (long)rnc42486Tag,
++        (unsigned long)rnc42486RequestId,
++        rnc42486RequestUptimeMs,
++        rnc42486RequestRNMs,
++        (int)NSThread.isMainThread,
++        (int)rnc42486RequestMainThread);
++#endif
++}
++
++#if TARGET_OS_IPHONE
++- (void)mountingTransactionDidMount:(const MountingTransaction &)transaction
++               withSurfaceTelemetry:(const SurfaceTelemetry &)surfaceTelemetry
++{
++  (void)surfaceTelemetry;
++  if (!NSThread.isMainThread || self.window == nil) {
++    return;
++  }
++  NSString *identifier = self.accessibilityIdentifier;
++  BOOL footerFixture = [identifier hasSuffix:@"-native-footer"];
++  NSString *suffix = footerFixture ? @"-native-footer" : @"-rnc-container";
++  if (![identifier hasSuffix:suffix]) {
++    return;
++  }
++  const double sampleStartRNMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  NSString *prefix = [identifier substringToIndex:identifier.length - suffix.length];
++  NSArray<NSString *> *names;
++  NSArray *views;
++  if (footerFixture) {
++    UIView *nativeContent = RNC42486DirectSubview(self, [prefix stringByAppendingString:@"-native-content"]);
++    UIView *jsFooter = RNC42486DirectSubview(self.superview, [prefix stringByAppendingString:@"-js-footer"]);
++    UIView *jsContent = RNC42486DirectSubview(jsFooter, [prefix stringByAppendingString:@"-js-content"]);
++    UIView *staticFooter = RNC42486DirectSubview(self.superview, [prefix stringByAppendingString:@"-animated-static-footer"]);
++    UIView *staticContent = RNC42486DirectSubview(staticFooter, [prefix stringByAppendingString:@"-animated-static-content"]);
++    UIView *workletFooter = RNC42486DirectSubview(self.superview, [prefix stringByAppendingString:@"-animated-worklet-footer"]);
++    UIView *workletContent = RNC42486DirectSubview(workletFooter, [prefix stringByAppendingString:@"-animated-worklet-content"]);
++    names = @[@"native-footer", @"native-content", @"js-footer", @"js-content",
++              @"animated-static-footer", @"animated-static-content", @"animated-worklet-footer", @"animated-worklet-content"];
++    views = @[self, (id)nativeContent ?: NSNull.null, (id)jsFooter ?: NSNull.null, (id)jsContent ?: NSNull.null,
++              (id)staticFooter ?: NSNull.null, (id)staticContent ?: NSNull.null,
++              (id)workletFooter ?: NSNull.null, (id)workletContent ?: NSNull.null];
++  } else {
++    UIView *rncMarker = RNC42486DirectSubview(self, [prefix stringByAppendingString:@"-rnc-marker"]);
++    UIView *rncChild = RNC42486DirectSubview(rncMarker, [prefix stringByAppendingString:@"-rnc-child"]);
++    UIView *coreContainer = RNC42486DirectSubview(self.superview, [prefix stringByAppendingString:@"-rn-core-container"]);
++    UIView *coreMarker = RNC42486DirectSubview(coreContainer, [prefix stringByAppendingString:@"-rn-core-marker"]);
++    UIView *coreChild = RNC42486DirectSubview(coreMarker, [prefix stringByAppendingString:@"-rn-core-child"]);
++    names = @[@"rnc-container", @"rnc-marker", @"rnc-child", @"rn-core-container", @"rn-core-marker", @"rn-core-child"];
++    views = @[self, (id)rncMarker ?: NSNull.null, (id)rncChild ?: NSNull.null,
++              (id)coreContainer ?: NSNull.null, (id)coreMarker ?: NSNull.null, (id)coreChild ?: NSNull.null];
++  }
++  const NSUInteger expectedTargets = names.count;
++  NSMutableSet<NSNumber *> *tags = [NSMutableSet new];
++  for (id candidate in views) {
++    if (candidate != NSNull.null) {
++      [tags addObject:@(((UIView *)candidate).tag)];
++    }
++  }
++
++  NSMutableDictionary<NSNumber *, NSDictionary *> *applied = [NSMutableDictionary new];
++  for (const auto &mutation : transaction.getMutations()) {
++    if (mutation.type != ShadowViewMutation::Insert && mutation.type != ShadowViewMutation::Update) {
++      continue;
++    }
++    const auto &next = mutation.newChildShadowView;
++    NSNumber *tag = @(next.tag);
++    if (![tags containsObject:tag]) {
++      continue;
++    }
++    const auto &previous = mutation.oldChildShadowView;
++    const auto &rect = next.layoutMetrics.frame;
++    const void *newData = nullptr;
++    const void *oldData = nullptr;
++    if (next.tag == self.tag) {
++      if (next.state) {
++        newData = &std::static_pointer_cast<RNCSafeAreaViewShadowNode::ConcreteState const>(next.state)->getData();
++      }
++      if (previous.state) {
++        oldData = &std::static_pointer_cast<RNCSafeAreaViewShadowNode::ConcreteState const>(previous.state)->getData();
++      }
++    }
++    NSUInteger count = [applied[tag][@"appliedCount"] unsignedIntegerValue] + 1;
++    // Retain the last applied endpoint for a target in a possibly coalesced transaction.
++    applied[tag] = @{
++      @"type" : mutation.type == ShadowViewMutation::Insert ? @"Insert" : @"Update",
++      @"appliedCount" : @(count), @"parentTag" : @(mutation.parentTag),
++      @"newStateRevision" : next.state ? (id)@(next.state->getRevision()) : NSNull.null,
++      @"oldStateRevision" : previous.state ? (id)@(previous.state->getRevision()) : NSNull.null,
++      @"newData" : RNC42486Pointer(newData), @"oldData" : RNC42486Pointer(oldData),
++      @"stateChanged" : @(previous.state != next.state),
++      @"frame" : RNC42486Rect(CGRectMake(rect.origin.x, rect.origin.y, rect.size.width, rect.size.height))
++    };
++  }
++  if (applied.count == 0) {
++    return;
++  }
++
++  NSDictionary *identity = @{
++    @"event" : @"mount-transaction-geometry", @"surfaceId" : @(transaction.getSurfaceId()),
++    @"transactionNumber" : @(transaction.getNumber()), @"sourceTag" : @(self.tag)
++  };
++  NSMutableArray<NSDictionary *> *rows = [NSMutableArray new];
++  // Reserve header/phase/clock positions; collect every UIView sample before the first NSLog.
++  [rows addObject:@{}];
++  NSMutableDictionary *phases = [identity mutableCopy];
++  const auto &telemetry = transaction.getTelemetry();
++  [phases addEntriesFromDictionary:@{
++    @"kind" : @"phases", @"telemetryRevision" : @(telemetry.getRevisionNumber()),
++    @"telemetryScope" : @"latest-revision",
++    @"commitStartSteadyMs" : RNC42486TelemetryMs(telemetry.getCommitStartTime()),
++    @"commitEndSteadyMs" : RNC42486TelemetryMs(telemetry.getCommitEndTime()),
++    @"layoutStartSteadyMs" : RNC42486TelemetryMs(telemetry.getLayoutStartTime()),
++    @"layoutEndSteadyMs" : RNC42486TelemetryMs(telemetry.getLayoutEndTime()),
++    @"diffStartSteadyMs" : RNC42486TelemetryMs(telemetry.getDiffStartTime()),
++    @"diffEndSteadyMs" : RNC42486TelemetryMs(telemetry.getDiffEndTime()),
++    @"mountStartSteadyMs" : RNC42486TelemetryMs(telemetry.getMountStartTime()),
++    @"mountEndSteadyMs" : RNC42486TelemetryMs(telemetry.getMountEndTime())
++  }];
++  [rows addObject:phases];
++  const double rnBeforeMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  const auto steadyNow = telemetryTimePointNow();
++  const double rnAfterMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  NSMutableDictionary *clock = [identity mutableCopy];
++  [clock addEntriesFromDictionary:@{
++    @"kind" : @"clock", @"rnBeforeMs" : @(rnBeforeMs),
++    @"steadyNowMs" : RNC42486TelemetryMs(steadyNow), @"rnAfterMs" : @(rnAfterMs)
++  }];
++  [rows addObject:clock];
++
++  NSUInteger missingTargets = 0;
++  for (NSUInteger index = 0; index < views.count; index++) {
++    NSMutableDictionary *target = [identity mutableCopy];
++    [target addEntriesFromDictionary:@{
++      @"kind" : @"target", @"testID" : [NSString stringWithFormat:@"%@-%@", prefix, names[index]],
++      @"rnMs" : @(HighResTimeStamp::now().toDOMHighResTimeStamp())
++    }];
++    id candidate = views[index];
++    if (candidate == NSNull.null) {
++      missingTargets++;
++      target[@"missing"] = @YES;
++      target[@"targetTag"] = NSNull.null;
++    } else {
++      UIView *view = candidate;
++      [target addEntriesFromDictionary:@{
++        @"targetTag" : @(view.tag), @"parentTag" : @(view.superview.tag),
++        @"window" : RNC42486Pointer((__bridge void *)view.window),
++        @"frame" : RNC42486Rect(view.frame),
++        @"windowRect" : view.window ? (id)RNC42486Rect([view convertRect:view.bounds toView:view.window]) : NSNull.null,
++        @"mutation" : (id)applied[@(view.tag)] ?: NSNull.null
++      }];
++    }
++    [rows addObject:target];
++  }
++  const double sampleEndRNMs = HighResTimeStamp::now().toDOMHighResTimeStamp();
++  NSDictionary *ownMutation = applied[@(self.tag)];
++  NSMutableDictionary *header = [identity mutableCopy];
++  [header addEntriesFromDictionary:@{
++    @"kind" : @"header", @"rnSampleStartMs" : @(sampleStartRNMs), @"rnSampleEndMs" : @(sampleEndRNMs),
++    @"uptimeMs" : @(NSProcessInfo.processInfo.systemUptime * 1000.0), @"mainThread" : @YES,
++    @"sourceTestID" : [identifier copy], @"fixture" : footerFixture ? @"footers" : @"native-state",
++    @"expectedTargets" : @(expectedTargets),
++    @"stateRevisionAfterMount" : _state ? (id)@(_state->getRevision()) : NSNull.null,
++    @"stateBottomAfterMount" : _state ? (id)@(_state->getData().insets.bottom) : NSNull.null,
++    @"stateData" : RNC42486Pointer(_state ? static_cast<const void *>(&_state->getData()) : nullptr),
++    @"ownMutationStateRevision" : ownMutation[@"newStateRevision"] ?: NSNull.null,
++    @"ownMutationData" : ownMutation[@"newData"] ?: NSNull.null
++  }];
++  rows[0] = header;
++  RNC42486EnqueueRows(rows, identity, expectedTargets, missingTargets, sampleEndRNMs);
++}
++#endif
+ 
+ #pragma mark - RCTComponentViewProtocol
+ 
+@@ -155,6 +517,7 @@
+ - (void)updateState:(State::Shared const &)state oldState:(State::Shared const &)oldState
+ {
+   _state = std::static_pointer_cast<RNCSafeAreaViewShadowNode::ConcreteState const>(state);
++  [self rnc42486TraceState:@"state-received"];
+ }
+ 
+ - (void)finalizeUpdates:(RNComponentViewUpdateMask)updateMask
+diff --git a/src/SafeAreaContext.tsx b/src/SafeAreaContext.tsx
+--- a/src/SafeAreaContext.tsx
++++ b/src/SafeAreaContext.tsx
+@@ -13,6 +13,27 @@
+   Rect,
+ } from './SafeArea.types';
+ 
++function rnc42486TraceProvider(
++  event: string,
++  providerId: string,
++  jsNow: number,
++  insets: EdgeInsets | null,
++  frame: Rect,
++  details?: Record<string, unknown>,
++) {
++  const probeGlobal = globalThis as typeof globalThis & {
++    __RNC42486Trace?: (data: {
++      event: string;
++      providerId: string;
++      jsNow: number;
++      insets: EdgeInsets | null;
++      frame: Rect;
++      details?: Record<string, unknown>;
++    }) => void;
++  };
++  probeGlobal.__RNC42486Trace?.({ event, providerId, jsNow, insets, frame, details });
++}
++
+ const isDev = process.env.NODE_ENV !== 'production';
+ 
+ export const SafeAreaInsetsContext = React.createContext<EdgeInsets | null>(
+@@ -45,6 +66,7 @@
+   ref,
+   ...others
+ }: SafeAreaProviderProps) {
++  const providerId = React.useId();
+   const parentInsets = useParentSafeAreaInsets();
+   const parentFrame = useParentSafeAreaFrame();
+   const [insets, setInsets] = React.useState<EdgeInsets | null>(
+@@ -61,9 +83,23 @@
+       },
+   );
+   const onInsetsChange = React.useCallback((event: InsetChangedEvent) => {
++    const jsNow = performance.now();
+     const {
+       nativeEvent: { frame: nextFrame, insets: nextInsets },
+     } = event;
++    const nativeEventTimeStamp = (
++      event.nativeEvent as Metrics & { timeStamp?: unknown }
++    ).timeStamp;
++
++    rnc42486TraceProvider(
++      'provider-event-received-js', providerId, jsNow, nextInsets, nextFrame,
++      {
++        nativeEventTimeStamp:
++          typeof nativeEventTimeStamp === 'number' && Number.isFinite(nativeEventTimeStamp)
++            ? nativeEventTimeStamp
++            : undefined,
++      },
++    );
+ 
+     setFrame((curFrame) => {
+       if (
+@@ -93,7 +129,17 @@
+         return curInsets;
+       }
+     });
+-  }, []);
++    rnc42486TraceProvider(
++      'provider-setters-returned-js', providerId, performance.now(), nextInsets, nextFrame,
++    );
++  }, [providerId]);
++
++  React.useLayoutEffect(() => {
++    const jsNow = performance.now();
++    rnc42486TraceProvider(
++      'provider-context-commit', providerId, jsNow, insets, frame,
++    );
++  }, [providerId, insets, frame]);
+ 
+   return (
+     <NativeSafeAreaProvider
+@@ -105,7 +151,17 @@
+       {insets != null ? (
+         <SafeAreaFrameContext.Provider value={frame}>
+           <SafeAreaInsetsContext.Provider value={insets}>
+-            {children}
++            <React.Profiler
++              id={providerId}
++              onRender={(id, phase, actualDuration, baseDuration, startTime, commitTime) => {
++                const jsNow = performance.now();
++                rnc42486TraceProvider('provider-render', id, jsNow, insets, frame, {
++                  phase, actualDuration, baseDuration, startTime, commitTime,
++                });
++              }}
++            >
++              {children}
++            </React.Profiler>
+           </SafeAreaInsetsContext.Provider>
+         </SafeAreaFrameContext.Provider>
+       ) : null}

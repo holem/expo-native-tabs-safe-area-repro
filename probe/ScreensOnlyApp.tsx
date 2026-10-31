@@ -1,7 +1,9 @@
 import TabScreen from "./TabScreen";
+import { ANIMATED_PROBES, EXTRA_PROVIDER, NATIVE_STATE_CONTROLS } from "./config";
 import { trace } from "./trace";
-import { type NativeSyntheticEvent, View } from "react-native";
-import { SafeAreaProvider } from "react-native-safe-area-context";
+import { useEffect } from "react";
+import { type NativeSyntheticEvent, Platform, View } from "react-native";
+import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Tabs, type TabSelectedEvent, type TabsHostNavStateRequest } from "react-native-screens";
 
 // This sets the initial selection only. Native owns subsequent user selections;
@@ -15,6 +17,21 @@ function recordTabSelected({ nativeEvent }: NativeSyntheticEvent<TabSelectedEven
 }
 
 function ScreensOnlyTabs() {
+  const insets = useSafeAreaInsets();
+
+  useEffect(() => {
+    trace("root", "context", {
+      insets,
+      platform: Platform.OS,
+      osVersion: Platform.Version,
+      activityEnabled: false,
+      extraProvider: EXTRA_PROVIDER,
+      animatedProbes: ANIMATED_PROBES && !NATIVE_STATE_CONTROLS,
+      nativeStateControls: NATIVE_STATE_CONTROLS,
+      container: "screens",
+    });
+  }, [insets]);
+
   return (
     <Tabs.Host navStateRequest={initialNavStateRequest} onTabSelected={recordTabSelected}>
       {(["index", "second", "third"] as const).map((name) => (

@@ -1,0 +1,276 @@
+diff --git a/Libraries/Renderer/implementations/ReactFabric-dev.js b/Libraries/Renderer/implementations/ReactFabric-dev.js
+--- a/Libraries/Renderer/implementations/ReactFabric-dev.js
++++ b/Libraries/Renderer/implementations/ReactFabric-dev.js
+@@ -1284,7 +1284,48 @@
+         e.isPersistent() || e.constructor.release(e);
+       }
+     }
++    // Observational only: the fixture owns the bounded buffer and capture window.
++    function rct42486Trace(event, makeData, root, always) {
++      try {
++        var bridge = globalThis.__RCT42486Trace;
++        if (typeof bridge !== "function" || (!always && bridge.enabled !== true)) return;
++        var stamp = performance.now();
++        var tracedRoot = typeof root === "function" ? root() : root;
++        bridge(event, makeData(), stamp, tracedRoot == null ? null : tracedRoot);
++      } catch (diagnosticError) {}
++    }
++    function rct42486Root(fiber) {
++      try {
++        for (var depth = 0; fiber != null && depth < 1000; depth++) {
++          if (fiber.tag === 3) return fiber.stateNode;
++          fiber = fiber.return;
++        }
++      } catch (diagnosticError) {}
++      return null;
++    }
++    function rct42486Fiber(fiber) {
++      if (fiber == null) return null;
++      var type = fiber.type, name = null;
++      if (typeof type === "string") name = type;
++      else if (typeof type === "function") name = type.displayName || type.name;
++      else if (type != null && typeof type === "object") {
++        name = type.displayName;
++        if (!name && typeof type.render === "function") name = type.render.displayName || type.render.name;
++        if (!name && typeof type.type === "function") name = type.type.displayName || type.type.name;
++      }
++      var props = fiber.memoizedProps;
++      return {
++        name: typeof name === "string" ? name : null,
++        tag: fiber.tag, mode: fiber.mode, flags: fiber.flags,
++        lanes: fiber.lanes, childLanes: fiber.childLanes,
++        testID: props != null && typeof props.testID === "string" ? props.testID : null
++      };
++    }
+     function dispatchEvent(target, topLevelType, nativeEventParam) {
++      var rct42486EventPayload = nativeEventParam;
++      rct42486Trace("dispatchEvent:start", function () { return {topLevelType: topLevelType, nativeEventTimeStamp: rct42486EventPayload == null ? null : rct42486EventPayload.timeStamp, nativeTarget: rct42486EventPayload == null ? null : rct42486EventPayload.target, insets: rct42486EventPayload != null && rct42486EventPayload.insets != null ? {top:rct42486EventPayload.insets.top,right:rct42486EventPayload.insets.right,bottom:rct42486EventPayload.insets.bottom,left:rct42486EventPayload.insets.left} : null, fiber:rct42486Fiber(target), executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, function () { return rct42486Root(target); }, true);
++      try {
++
+       var nativeEvent =
+           null != nativeEventParam && "object" === typeof nativeEventParam
+             ? nativeEventParam
+@@ -1350,6 +1391,9 @@
+           }
+         }
+       });
++          } finally {
++      rct42486Trace("dispatchEvent:end", function () { return {topLevelType: topLevelType, nativeEventTimeStamp: rct42486EventPayload == null ? null : rct42486EventPayload.timeStamp, nativeTarget: rct42486EventPayload == null ? null : rct42486EventPayload.target, insets: rct42486EventPayload != null && rct42486EventPayload.insets != null ? {top:rct42486EventPayload.insets.top,right:rct42486EventPayload.insets.right,bottom:rct42486EventPayload.insets.bottom,left:rct42486EventPayload.insets.left} : null, fiber:rct42486Fiber(target), executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, function () { return rct42486Root(target); }, true);
++      }
+     }
+     function injectInternals(internals) {
+       if ("undefined" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__) return !1;
+@@ -3737,6 +3781,9 @@
+     }
+     function noop() {}
+     function ensureRootIsScheduled(root) {
++      rct42486Trace("ensureRootIsScheduled:start", function () { return {pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      try {
++
+       root !== lastScheduledRoot &&
+         null === root.next &&
+         (null === lastScheduledRoot
+@@ -3751,6 +3798,9 @@
+       ReactSharedInternals.isBatchingLegacy &&
+         0 === root.tag &&
+         (ReactSharedInternals.didScheduleLegacyUpdate = !0);
++          } finally {
++      rct42486Trace("ensureRootIsScheduled:end", function () { return {pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      }
+     }
+     function flushSyncWorkAcrossRoots_impl(syncTransitionLanes, onlyLegacy) {
+       if (!isFlushingWork && mightHavePendingSyncWork) {
+@@ -3801,6 +3851,9 @@
+       processRootScheduleInMicrotask();
+     }
+     function processRootScheduleInMicrotask() {
++      rct42486Trace("processRootScheduleInMicrotask:start", function () { return {mightHavePendingSyncWork: mightHavePendingSyncWork, firstRootPendingLanes: firstScheduledRoot == null ? null : firstScheduledRoot.pendingLanes, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, firstScheduledRoot, false);
++      try {
++
+       mightHavePendingSyncWork =
+         didScheduleMicrotask_act =
+         didScheduleMicrotask =
+@@ -3824,6 +3877,9 @@
+         pendingEffectsStatus !== PENDING_PASSIVE_PHASE) ||
+         flushSyncWorkAcrossRoots_impl(0, !1);
+       0 !== currentEventTransitionLane && (currentEventTransitionLane = 0);
++          } finally {
++      rct42486Trace("processRootScheduleInMicrotask:end", function () { return {mightHavePendingSyncWork: mightHavePendingSyncWork, firstRootPendingLanes: firstScheduledRoot == null ? null : firstScheduledRoot.pendingLanes, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, firstScheduledRoot, false);
++      }
+     }
+     function scheduleTaskForRootDuringMicrotask(root, currentTime) {
+       for (
+@@ -7219,14 +7275,21 @@
+             entangleTransitionUpdate(update, queue, args)));
+     }
+     function dispatchSetState(fiber, queue, action) {
++      rct42486Trace("dispatchSetState:start", function () { return {fiber: rct42486Fiber(fiber), actionKind: typeof action, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, function () { return rct42486Root(fiber); }, false);
++      try {
++
+       var args = arguments;
+       "function" === typeof args[3] &&
+         console.error(
+           "State updates from the useState() and useReducer() Hooks don't support the second callback argument. To execute a side effect after rendering, declare it in the component body with useEffect()."
+         );
+       args = requestUpdateLane(fiber);
++      rct42486Trace("dispatchSetState:lane", function () { return {lane: args, fiber: rct42486Fiber(fiber), stateBottom: queue.lastRenderedState != null && typeof queue.lastRenderedState.bottom === "number" ? queue.lastRenderedState.bottom : null, stateHeight: queue.lastRenderedState != null && typeof queue.lastRenderedState.height === "number" ? queue.lastRenderedState.height : null, nativePriority: fabricGetCurrentEventPriority ? fabricGetCurrentEventPriority() : null, transitionActive: ReactSharedInternals.T !== null, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, function () { return rct42486Root(fiber); }, false);
+       dispatchSetStateInternal(fiber, queue, action, args) &&
+         startUpdateTimerByLane(args, "setState()", fiber);
++          } finally {
++      rct42486Trace("dispatchSetState:end", function () { return {fiber: rct42486Fiber(fiber), actionKind: typeof action, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, function () { return rct42486Root(fiber); }, false);
++      }
+     }
+     function dispatchSetStateInternal(fiber, queue, action, lane) {
+       var update = {
+@@ -10975,6 +11038,9 @@
+           );
+     }
+     function commitHookEffectListMount(flags, finishedWork) {
++      rct42486Trace("commitHookEffectListMount:start", function () { return {flags: flags, passive: (flags & 8) !== 0, fiber: rct42486Fiber(finishedWork), executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, function () { return rct42486Root(finishedWork); }, false);
++      try {
++
+       try {
+         var updateQueue = finishedWork.updateQueue,
+           lastEffect = null !== updateQueue ? updateQueue.lastEffect : null;
+@@ -11032,6 +11098,9 @@
+         }
+       } catch (error) {
+         captureCommitPhaseError(finishedWork, finishedWork.return, error);
++      }
++          } finally {
++      rct42486Trace("commitHookEffectListMount:end", function () { return {flags: flags, passive: (flags & 8) !== 0, fiber: rct42486Fiber(finishedWork), executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, function () { return rct42486Root(finishedWork); }, false);
+       }
+     }
+     function commitHookEffectListUnmount(
+@@ -14008,6 +14077,9 @@
+       }
+     }
+     function scheduleUpdateOnFiber(root, fiber, lane) {
++      rct42486Trace("scheduleUpdateOnFiber:start", function () { return {lane: lane, fiber: rct42486Fiber(fiber), pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      try {
++
+       isRunningInsertionEffect &&
+         console.error("useInsertionEffect must not schedule updates.");
+       isFlushingPassiveEffects && (didScheduleUpdateDuringPassiveEffects = !0);
+@@ -14074,8 +14146,14 @@
+             ReactSharedInternals.isBatchingLegacy ||
+             ((workInProgressRootRenderTargetTime = now$1() + RENDER_TIMEOUT_MS),
+             flushSyncWorkAcrossRoots_impl(0, !0));
++          } finally {
++      rct42486Trace("scheduleUpdateOnFiber:end", function () { return {lane: lane, fiber: rct42486Fiber(fiber), pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      }
+     }
+     function performWorkOnRoot(root, lanes, forceSync) {
++      rct42486Trace("performWorkOnRoot:start", function () { return {lanes: lanes, forceSync: forceSync, pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      try {
++
+       if ((executionContext & (RenderContext | CommitContext)) !== NoContext)
+         throw Error("Should not already be working.");
+       if (0 !== workInProgressRootRenderLanes && null !== workInProgress) {
+@@ -14396,6 +14474,9 @@
+         break;
+       } while (1);
+       ensureRootIsScheduled(root);
++          } finally {
++      rct42486Trace("performWorkOnRoot:end", function () { return {lanes: lanes, forceSync: forceSync, pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      }
+     }
+     function completeRootWhenReady(
+       root,
+@@ -14982,6 +15063,9 @@
+         );
+     }
+     function renderRootSync(root, lanes, shouldYieldForPrerendering) {
++      rct42486Trace("renderRootSync:start", function () { return {lanes: typeof lanes === "number" ? lanes : null, pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, exitStatus: workInProgressRootExitStatus, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      try {
++
+       var prevExecutionContext = executionContext;
+       executionContext |= RenderContext;
+       var prevDispatcher = pushDispatcher(),
+@@ -15056,11 +15140,17 @@
+         (workInProgressRootRenderLanes = 0),
+         finishQueueingConcurrentUpdates());
+       return memoizedUpdaters;
++          } finally {
++      rct42486Trace("renderRootSync:end", function () { return {lanes: typeof lanes === "number" ? lanes : null, pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, exitStatus: workInProgressRootExitStatus, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      }
+     }
+     function workLoopSync() {
+       for (; null !== workInProgress; ) performUnitOfWork(workInProgress);
+     }
+     function renderRootConcurrent(root, lanes) {
++      rct42486Trace("renderRootConcurrent:start", function () { return {lanes: typeof lanes === "number" ? lanes : null, pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, exitStatus: workInProgressRootExitStatus, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      try {
++
+       var prevExecutionContext = executionContext;
+       executionContext |= RenderContext;
+       var prevDispatcher = pushDispatcher(),
+@@ -15217,12 +15307,18 @@
+       workInProgressRootRenderLanes = 0;
+       finishQueueingConcurrentUpdates();
+       return workInProgressRootExitStatus;
++          } finally {
++      rct42486Trace("renderRootConcurrent:end", function () { return {lanes: typeof lanes === "number" ? lanes : null, pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, exitStatus: workInProgressRootExitStatus, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      }
+     }
+     function workLoopConcurrentByScheduler() {
+       for (; null !== workInProgress && !shouldYield(); )
+         performUnitOfWork(workInProgress);
+     }
+     function performUnitOfWork(unitOfWork) {
++      rct42486Trace("performUnitOfWork:start", function () { return {fiber: rct42486Fiber(unitOfWork), executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, workInProgressRoot, false);
++      try {
++
+       var current = unitOfWork.alternate;
+       0 !== (unitOfWork.mode & 2)
+         ? (startProfilerTimer(unitOfWork),
+@@ -15245,6 +15341,9 @@
+       null === current
+         ? completeUnitOfWork(unitOfWork)
+         : (workInProgress = current);
++          } finally {
++      rct42486Trace("performUnitOfWork:end", function () { return {fiber: rct42486Fiber(unitOfWork), executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, workInProgressRoot, false);
++      }
+     }
+     function replaySuspendedUnitOfWork(unitOfWork) {
+       var next = runWithFiberInDEV(unitOfWork, replayBeginWork, unitOfWork);
+@@ -15575,6 +15674,9 @@
+       suspendedCommitReason,
+       completedRenderEndTime
+     ) {
++      rct42486Trace("commitRoot:start", function () { return {lanes: lanes, fiber: rct42486Fiber(finishedWork), pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, pendingEffectsStatus: pendingEffectsStatus, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      try {
++
+       var remainingLanes = finishedWork.lanes | finishedWork.childLanes;
+       pendingEffectsRemainingLanes = remainingLanes;
+       remainingLanes |= concurrentlyUpdatedLanes;
+@@ -15648,6 +15750,9 @@
+             finishedViewTransition.bind(null, lanes)
+           )))
+         : (flushMutationEffects(), flushLayoutEffects(), flushSpawnedWork());
++          } finally {
++      rct42486Trace("commitRoot:end", function () { return {lanes: lanes, fiber: rct42486Fiber(finishedWork), pendingLanes: root == null ? null : root.pendingLanes, callbackPriority: root == null ? null : root.callbackPriority, pendingEffectsStatus: pendingEffectsStatus, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, root, false);
++      }
+     }
+     function reportViewTransitionError(error) {
+       if (pendingEffectsStatus !== NO_PENDING_EFFECTS) {
+@@ -16006,6 +16111,9 @@
+       return flushPassiveEffects();
+     }
+     function flushPassiveEffects() {
++      rct42486Trace("flushPassiveEffects:start", function () { return {pendingEffectsStatus: pendingEffectsStatus, pendingEffectsLanes: pendingEffectsLanes, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, pendingEffectsRoot, false);
++      try {
++
+       if (pendingEffectsStatus !== PENDING_PASSIVE_PHASE) return !1;
+       var root = pendingEffectsRoot,
+         remainingLanes = pendingEffectsRemainingLanes;
+@@ -16150,6 +16258,9 @@
+         (currentUpdatePriority = previousPriority),
+           (ReactSharedInternals.T = renderPriority),
+           releaseRootPooledCache(root, remainingLanes);
++      }
++          } finally {
++      rct42486Trace("flushPassiveEffects:end", function () { return {pendingEffectsStatus: pendingEffectsStatus, pendingEffectsLanes: pendingEffectsLanes, executionContext: executionContext, currentUpdatePriority: currentUpdatePriority, renderLanes: workInProgressRootRenderLanes}; }, (root == null ? pendingEffectsRoot : root), false);
+       }
+     }
+     function captureCommitPhaseErrorOnRoot(rootFiber, sourceFiber, error) {

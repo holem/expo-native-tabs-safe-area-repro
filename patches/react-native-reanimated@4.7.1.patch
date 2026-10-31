@@ -1,0 +1,397 @@
+diff --git a/src/mappers.native.ts b/src/mappers.native.ts
+--- a/src/mappers.native.ts
++++ b/src/mappers.native.ts
+@@ -9,6 +9,17 @@
+   MapperRawInputs,
+ } from './commonTypes';
+ import { isSharedValue } from './isSharedValue';
++
++// Diagnostic recorder owns a bounded UI-runtime buffer; no per-event RN scheduling.
++function rnc42486UITrace(event: string, data: Record<string, number | string | boolean | null>) {
++  'worklet';
++  try {
++    const recorder = (globalThis as typeof globalThis & {
++      __RNC42486UITrace?: (event: string, data: Record<string, number | string | boolean | null>) => void;
++    }).__RNC42486UITrace;
++    if (typeof recorder === 'function') recorder(event, data);
++  } catch { /* Diagnostics must not change mapper/props execution. */ }
++}
+ 
+ function createMapperRegistry() {
+   'worklet';
+@@ -78,14 +89,17 @@
+   let mapperRunFinalizers: (() => void)[] = [];
+   global.__requestMapperRunFinalizer = (finalizer: () => void) => {
+     mapperRunFinalizers.push(finalizer);
++    rnc42486UITrace("mapper-finalizer-queued", { count: mapperRunFinalizers.length, processingMappers });
+   };
+ 
+   let isAnyMapperDirty = false;
+ 
+   function mapperRun() {
+     if (processingMappers) {
++      rnc42486UITrace("mapper-run-skipped", { reason: "already-processing" });
+       return;
+     }
++    rnc42486UITrace("mapper-run-enter", { mapperCount: mappers.size, anyDirty: isAnyMapperDirty, finalizers: mapperRunFinalizers.length });
+     try {
+       processingMappers = true;
+       if (mappers.size !== sortedMappers.length) {
+@@ -96,24 +110,37 @@
+         for (const mapper of sortedMappers) {
+           if (mapper.dirty) {
+             mapper.dirty = false;
++            rnc42486UITrace("mapper-worklet-enter", { mapperId: mapper.id });
+             mapper.worklet();
++            rnc42486UITrace("mapper-worklet-exit", { mapperId: mapper.id });
++          } else {
++            rnc42486UITrace("mapper-worklet-skipped", { mapperId: mapper.id, reason: "clean" });
+           }
+         }
++      } else {
++        rnc42486UITrace("mapper-run-skipped", { reason: "no-dirty-mappers", mapperCount: mappers.size });
+       }
+     } finally {
+       processingMappers = false;
+       const finalizers = mapperRunFinalizers;
+       mapperRunFinalizers = [];
++      rnc42486UITrace("mapper-finalizers-enter", { count: finalizers.length });
++      let rnc42486FinalizerIndex = 0;
+       for (const finalizer of finalizers) {
++        rnc42486UITrace("mapper-finalizer-enter", { index: rnc42486FinalizerIndex });
+         finalizer();
+-      }
++        rnc42486UITrace("mapper-finalizer-exit", { index: rnc42486FinalizerIndex++ });
++      }
++      rnc42486UITrace("mapper-run-exit", { mapperCount: mappers.size, anyDirty: isAnyMapperDirty });
+     }
+   }
+ 
+   const schedulingFunction = globalThis.requestAnimationFrameFinalizer;
+ 
+   function scheduledMapperRun() {
++    rnc42486UITrace("mapper-frame-finalizer-enter", { anyDirty: isAnyMapperDirty });
+     mapperRun();
++    rnc42486UITrace("mapper-frame-finalizer-exit", { anyDirty: isAnyMapperDirty });
+     // We always run mappers on native.
+     schedulingFunction(scheduledMapperRun);
+   }
+@@ -164,15 +191,18 @@
+       mappers.set(mapper.id, mapper);
+       sortedMappers = [];
+       isAnyMapperDirty = true;
++      rnc42486UITrace("mapper-registered", { mapperId: mapper.id, inputs: mapper.inputs.length, outputs: outputs?.length ?? 0 });
+       for (const sv of mapper.inputs) {
+         sv.addListener(mapper.id, () => {
+           mapper.dirty = true;
+           isAnyMapperDirty = true;
++          rnc42486UITrace("mapper-listener-dirty", { mapperId: mapper.id });
+         });
+       }
+     },
+     stop: (mapperID: number) => {
+       const mapper = mappers.get(mapperID);
++      rnc42486UITrace("mapper-stop", { mapperId: mapperID, found: mapper !== undefined });
+       if (mapper) {
+         mappers.delete(mapper.id);
+         sortedMappers = [];
+@@ -193,13 +223,20 @@
+   outputs: MapperOutputs = []
+ ): number {
+   const mapperID = (MAPPER_ID += 1);
++  let rnc42486RequestRNMs: number | null = null;
++  try {
++    const now = globalThis.performance?.now();
++    if (typeof now === 'number' && Number.isFinite(now)) rnc42486RequestRNMs = now;
++  } catch { /* An unavailable diagnostic clock must not prevent registration. */ }
+ 
+   scheduleOnUI(() => {
++    rnc42486UITrace("mapper-registration-ui-enter", { mapperId: mapperID, requestRNMs: rnc42486RequestRNMs });
+     let mapperRegistry = global.__mapperRegistry;
+     if (mapperRegistry === undefined) {
+       mapperRegistry = global.__mapperRegistry = createMapperRegistry();
+     }
+     mapperRegistry.start(mapperID, worklet, inputs, outputs);
++    rnc42486UITrace("mapper-registration-ui-exit", { mapperId: mapperID, requestRNMs: rnc42486RequestRNMs });
+   });
+ 
+   return mapperID;
+diff --git a/src/updateProps/updateProps.native.ts b/src/updateProps/updateProps.native.ts
+--- a/src/updateProps/updateProps.native.ts
++++ b/src/updateProps/updateProps.native.ts
+@@ -20,6 +20,17 @@
+ } from '../createAnimatedComponent/commonTypes';
+ import jsPropsUpdater from '../createAnimatedComponent/JSPropsUpdater';
+ import { getStaticFeatureFlag } from '../featureFlags';
++
++// Diagnostic recorder owns a bounded UI-runtime buffer; no per-event RN scheduling.
++function rnc42486UITrace(event: string, data: Record<string, number | string | boolean | null>) {
++  'worklet';
++  try {
++    const recorder = (globalThis as typeof globalThis & {
++      __RNC42486UITrace?: (event: string, data: Record<string, number | string | boolean | null>) => void;
++    }).__RNC42486UITrace;
++    if (typeof recorder === 'function') recorder(event, data);
++  } catch { /* Diagnostics must not change mapper/props execution. */ }
++}
+ 
+ const USE_ANIMATION_BACKEND = getStaticFeatureFlag('USE_ANIMATION_BACKEND');
+ 
+@@ -74,6 +85,7 @@
+   let jsOperations: JSPropsOperation[] = [];
+ 
+   let flushPending = false;
++  let rnc42486FlushSequence = 0;
+ 
+   const processViewUpdates = (tag: number, updates: PropUpdates) =>
+     Object.entries(updates).reduce<{
+@@ -99,6 +111,13 @@
+           updates
+         );
+ 
++        const rnc42486PaddingBottom = nativePropUpdates?.paddingBottom;
++        rnc42486UITrace("update-props-enqueue", {
++          flushId: rnc42486FlushSequence + 1, tag: viewTag, propsCount: Object.keys(updates).length,
++          nativePropsCount: nativePropUpdates ? Object.keys(nativePropUpdates).length : 0,
++          jsPropsCount: jsPropUpdates ? Object.keys(jsPropUpdates).length : 0,
++          paddingBottom: typeof rnc42486PaddingBottom === "number" ? rnc42486PaddingBottom : null, flushPending,
++        });
+         if (nativePropUpdates) {
+           nativeOperations.push({
+             shadowNodeWrapper,
+@@ -115,23 +134,32 @@
+         if (!flushPending && (nativePropUpdates || jsPropUpdates)) {
+           global.__requestMapperRunFinalizer(this.flush);
+           flushPending = true;
++          rnc42486UITrace("update-props-finalizer-requested", { flushId: rnc42486FlushSequence + 1 });
+         }
+       });
+     },
+     flush(this: void) {
++      const rnc42486FlushId = ++rnc42486FlushSequence;
++      rnc42486UITrace("update-props-flush-enter", { flushId: rnc42486FlushId, nativeCount: nativeOperations.length, jsCount: jsOperations.length });
+       if (nativeOperations.length) {
++        rnc42486UITrace("update-props-native-call-enter", { flushId: rnc42486FlushId, count: nativeOperations.length });
+         global._updateProps!(nativeOperations);
++        rnc42486UITrace("update-props-native-call-exit", { flushId: rnc42486FlushId, count: nativeOperations.length });
+         nativeOperations.length = 0;
+       }
+       if (jsOperations.length) {
+         // Fresh array each flush: scheduleOnRN caches serialized args by identity.
++        rnc42486UITrace("update-props-rn-schedule", { flushId: rnc42486FlushId, count: jsOperations.length });
+         scheduleOnRN(updateJSProps, jsOperations);
+         jsOperations = [];
+       }
+       flushPending = false;
+       if (!USE_ANIMATION_BACKEND) {
++        rnc42486UITrace("update-props-maybe-flush-enter", { flushId: rnc42486FlushId });
+         global._maybeFlushUIUpdatesQueue();
++        rnc42486UITrace("update-props-maybe-flush-exit", { flushId: rnc42486FlushId });
+       }
++      rnc42486UITrace("update-props-flush-exit", { flushId: rnc42486FlushId, flushPending });
+     },
+   };
+ }
+diff --git a/Common/cpp/reanimated/NativeModules/ReanimatedModuleProxy.cpp b/Common/cpp/reanimated/NativeModules/ReanimatedModuleProxy.cpp
+--- a/Common/cpp/reanimated/NativeModules/ReanimatedModuleProxy.cpp
++++ b/Common/cpp/reanimated/NativeModules/ReanimatedModuleProxy.cpp
+@@ -26,6 +26,28 @@
+ #ifdef __ANDROID__
+ #include <fbjni/fbjni.h>
+ #endif // __ANDROID__
++
++#include <atomic>
++#include <chrono>
++#if defined(__APPLE__)
++#include <os/log.h>
++#include <pthread.h>
++#endif
++
++namespace {
++static std::atomic<uint64_t> rnc42486ProxySequence{0};
++static void rnc42486ProxyTrace(const char *event, uint64_t sequence, uint64_t count = 0,
++                              int flag = -1, int status = -1, int64_t surfaceId = -1) {
++#if defined(__APPLE__)
++  const double steadyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
++  uint64_t thread = 0;
++  pthread_threadid_np(nullptr, &thread);
++  os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "[native-tabs-42486] reanimated steadyMs=%{public}.6f event=%{public}s source=proxy opSequence=%{public}llu count=%{public}llu flag=%{public}d status=%{public}d surfaceId=%{public}lld thread=%{public}llu mainThread=%{public}d",
++              steadyMs, event, static_cast<unsigned long long>(sequence), static_cast<unsigned long long>(count),
++              flag, status, static_cast<long long>(surfaceId), static_cast<unsigned long long>(thread), pthread_main_np());
++#endif
++}
++}
+ 
+ #include <algorithm>
+ #include <functional>
+@@ -255,9 +277,20 @@
+       return;
+     }
+ 
++    const uint64_t rnc42486Sequence = ++rnc42486ProxySequence;
++    uint64_t rnc42486Count = 0;
++    bool rnc42486CountKnown = false;
++    try {
++      rnc42486Count = operations.asObject(rt).asArray(rt).size(rt);
++      rnc42486CountKnown = true;
++    } catch (...) { /* Leave validation/errors to the original registry update below. */ }
++    rnc42486ProxyTrace("registry-update-enter", rnc42486Sequence, rnc42486Count, rnc42486CountKnown ? 1 : 0);
+     const auto timestamp = strongThis->getAnimationTimestamp_();
++    rnc42486ProxyTrace("registry-lock-request", rnc42486Sequence, rnc42486Count, rnc42486CountKnown ? 1 : 0);
+     auto lock = strongThis->updatesRegistryManager_->lock();
++    rnc42486ProxyTrace("registry-lock-acquired", rnc42486Sequence, rnc42486Count, rnc42486CountKnown ? 1 : 0);
+     strongThis->animatedPropsRegistry_->update(rt, operations, timestamp);
++    rnc42486ProxyTrace("registry-update-exit", rnc42486Sequence, rnc42486Count, rnc42486CountKnown ? 1 : 0);
+   };
+ 
+   auto measure = [weakThis = weak_from_this()](jsi::Runtime &rt, const jsi::Value &shadowNodeValue) -> jsi::Value {
+@@ -766,6 +799,8 @@
+   }
+ 
+   ReanimatedSystraceSection s("ReanimatedModuleProxy::performOperations");
++  const uint64_t rnc42486Sequence = ++rnc42486ProxySequence;
++  rnc42486ProxyTrace("perform-operations-enter", rnc42486Sequence);
+ 
+   flushLayoutAnimationOperations();
+   executeLayoutAnimationsRequests();
+@@ -849,7 +884,10 @@
+     applySynchronousUpdates(synchronousUpdatesBatch);
+   }
+ 
++  rnc42486ProxyTrace("perform-operations-flushed", rnc42486Sequence, propsMapBySurface.size(),
++                    (flushRegistry ? 1 : 0) | (hasCommitUpdates ? 2 : 0));
+   if (updatesRegistryManager_->shouldReanimatedSkipCommit()) {
++    rnc42486ProxyTrace("perform-operations-skip-paused", rnc42486Sequence, propsMapBySurface.size());
+     // It may happen that `performOperations` is called on the UI thread
+     // while React Native tries to commit a new tree on the JS thread.
+     // In this case, we should skip the commit here and let React Native do
+@@ -860,11 +898,15 @@
+     }
+     if (hasCommitUpdates) {
+       updatesRegistryManager_->pleaseCommitAfterPause();
+-    }
++      rnc42486ProxyTrace("perform-operations-request-after-pause", rnc42486Sequence);
++    }
++    rnc42486ProxyTrace("perform-operations-exit-paused", rnc42486Sequence);
+     return;
+   }
+ 
++  rnc42486ProxyTrace("perform-operations-commit-enter", rnc42486Sequence, propsMapBySurface.size());
+   commitUpdates(propsMapBySurface);
++  rnc42486ProxyTrace("perform-operations-exit", rnc42486Sequence, propsMapBySurface.size());
+ }
+ 
+ void ReanimatedModuleProxy::performNonLayoutOperations() {
+@@ -1117,9 +1159,14 @@
+   // No registry lock is held here - shadowTree.commit re-enters via ReanimatedCommitHook.
+   for (auto const &[surfaceId, propsMap] : propsMapBySurface) {
+     shadowTreeRegistry.visit(surfaceId, [&](ShadowTree const &shadowTree) {
++      const uint64_t rnc42486Sequence = ++rnc42486ProxySequence;
++      uint64_t rnc42486Attempt = 0;
++      rnc42486ProxyTrace("commit-updates-enter", rnc42486Sequence, propsMap.size(), -1, -1, surfaceId);
+       const auto status = shadowTree.commit(
+           [&](RootShadowNode const &oldRootShadowNode) -> RootShadowNode::Unshared {
++            rnc42486ProxyTrace("commit-callback-enter", rnc42486Sequence, ++rnc42486Attempt, -1, -1, surfaceId);
+             if (updatesRegistryManager_->shouldReanimatedSkipCommit()) {
++              rnc42486ProxyTrace("commit-callback-cancel-paused", rnc42486Sequence, rnc42486Attempt, -1, -1, surfaceId);
+               return nullptr;
+             }
+ 
+@@ -1130,12 +1177,14 @@
+ 
+             auto reaShadowNode = std::reinterpret_pointer_cast<ReanimatedCommitShadowNode>(rootNode);
+             reaShadowNode->setReanimatedCommitTrait();
++            rnc42486ProxyTrace("commit-callback-exit", rnc42486Sequence, rnc42486Attempt, -1, -1, surfaceId);
+ 
+             return rootNode;
+           },
+           {/* .enableStateReconciliation = */
+            false,
+            /* .mountSynchronously = */ true});
++      rnc42486ProxyTrace("commit-updates-exit", rnc42486Sequence, propsMap.size(), -1, static_cast<int>(status), surfaceId);
+ 
+ #ifdef ANDROID
+       if (status == ShadowTree::CommitStatus::Succeeded) {
+diff --git a/apple/reanimated/apple/REANodesManager.mm b/apple/reanimated/apple/REANodesManager.mm
+--- a/apple/reanimated/apple/REANodesManager.mm
++++ b/apple/reanimated/apple/REANodesManager.mm
+@@ -9,6 +9,17 @@
+ #import <React/RCTMountingManager.h>
+ #import <React/RCTUtils.h>
+ 
++#include <atomic>
++#include <chrono>
++
++static std::atomic<uint64_t> rnc42486NodesSequence{0};
++static void rnc42486NodesTrace(const char *event, uint64_t sequence, NSUInteger count = 0, int paused = -1)
++{
++  const double steadyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
++  NSLog(@"[native-tabs-42486] reanimated steadyMs=%.6f event=%s source=nodes opSequence=%llu count=%lu paused=%d mainThread=%d",
++        steadyMs, event, static_cast<unsigned long long>(sequence), static_cast<unsigned long>(count), paused, (int)NSThread.isMainThread);
++}
++
+ using namespace facebook::react;
+ 
+ @implementation REANodesManager {
+@@ -101,8 +112,10 @@
+ {
+   RCTAssertMainQueue();
+ 
++  const uint64_t rnc42486Sequence = ++rnc42486NodesSequence;
+   NSArray<REAOnAnimationCallback> *callbacks = _onAnimationCallbacks;
+   _onAnimationCallbacks = [NSMutableArray new];
++  rnc42486NodesTrace("animation-frame-enter", rnc42486Sequence, callbacks.count);
+ 
+   // When one of the callbacks would postOnAnimation callback we don't want
+   // to process it until the next frame. This is why we cpy the array before
+@@ -111,21 +124,29 @@
+     block(displayLink);
+   }
+ 
++  rnc42486NodesTrace("animation-frame-callbacks-exit", rnc42486Sequence, callbacks.count);
+   [self performOperations];
++  rnc42486NodesTrace("animation-frame-operations-exit", rnc42486Sequence, _onAnimationCallbacks.count);
+ 
+   if (_onAnimationCallbacks.count == 0) {
+     [self stopUpdatingOnAnimationFrame];
+-  }
++    rnc42486NodesTrace("animation-frame-stop", rnc42486Sequence);
++  }
++  rnc42486NodesTrace("animation-frame-exit", rnc42486Sequence);
+ }
+ 
+ - (void)performOperations
+ {
+   RCTAssertMainQueue();
++  const uint64_t rnc42486Sequence = ++rnc42486NodesSequence;
+   REAPerformOperations performOperations = _performOperations;
++  rnc42486NodesTrace("nodes-perform-enter", rnc42486Sequence);
+   if (performOperations == nil) {
++    rnc42486NodesTrace("nodes-perform-skipped-no-callback", rnc42486Sequence);
+     return;
+   }
+   performOperations(); // calls ReanimatedModuleProxy::performOperations
++  rnc42486NodesTrace("nodes-perform-exit", rnc42486Sequence);
+ }
+ 
+ - (void)dispatchEvent:(id<RCTEvent>)event
+@@ -153,9 +174,17 @@
+ - (void)maybeFlushUIUpdatesQueue
+ {
+   RCTAssertMainQueue();
+-  if ([[self getDisplayLink] isPaused]) {
++  const uint64_t rnc42486Sequence = ++rnc42486NodesSequence;
++  rnc42486NodesTrace("maybe-flush-enter", rnc42486Sequence);
++  const BOOL rnc42486Paused = [[self getDisplayLink] isPaused];
++  rnc42486NodesTrace("maybe-flush-decision", rnc42486Sequence, 0, (int)rnc42486Paused);
++  if (rnc42486Paused) {
+     [self performOperations];
+-  }
++    rnc42486NodesTrace("maybe-flush-performed", rnc42486Sequence, 0, 1);
++  } else {
++    rnc42486NodesTrace("maybe-flush-deferred-frame", rnc42486Sequence, 0, 0);
++  }
++  rnc42486NodesTrace("maybe-flush-exit", rnc42486Sequence, 0, (int)rnc42486Paused);
+ }
+ 
+ - (void)synchronouslyUpdateUIProps:(ReactTag)viewTag props:(const folly::dynamic &)props
